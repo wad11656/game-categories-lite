@@ -76,6 +76,7 @@ static const char* GC_CATEGORY_PREFIX_INTERNAL = "gcw_";
 
 #define FAKE_REGION_RUSSIA         10
 #define FAKE_REGION_CHINA          11
+#define FAKE_REGION_DEBUG_TYPE_I   12
 #define SE_CONFIG_EX_NID           0x8E426F09
 #define XMBIH_COUNT_PATCH_OFFSET   0x20890
 #define MIPS_OPCODE_JAL            0x03
@@ -235,7 +236,8 @@ static int is_ark_custom_item(const char *text) {
 
 static int fake_region_value_hides_extras(int vshregion) {
     return vshregion == FAKE_REGION_RUSSIA ||
-           vshregion == FAKE_REGION_CHINA;
+           vshregion == FAKE_REGION_CHINA ||
+           vshregion == FAKE_REGION_DEBUG_TYPE_I;
 }
 
 static int extras_hidden_by_fake_region(void) {
