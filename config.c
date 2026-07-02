@@ -19,6 +19,8 @@
 
 #include <pspiofilemgr.h>
 #include "config.h"
+
+void InvalidateCategoryCache(void);   /* vshitem.c */
 #include "psppaf.h"
 #include "logger.h"
 
@@ -74,6 +76,9 @@ int save_config() {
         sce_paf_private_memcpy(&prev_conf, &config, sizeof(CategoryConfig));
         if(reset) {
             kprintf("reset MS\n");
+            /* Mode/layout changed: drop the cached category index so the
+             * forced reinsertion below rebuilds it from disk. */
+            InvalidateCategoryCache();
             // Fake MS Reinsertion
             sce_paf_private_strcpy(device, "fatxx0:");
             device[3] = 'm';

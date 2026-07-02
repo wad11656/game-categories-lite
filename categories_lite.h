@@ -208,6 +208,9 @@ void PatchGamePluginForGCread(u32 text_addr);
 // Functions in: selection.c
 void PatchSelection(u32 text_addr);
 
+// Functions in: vshitem.c -- category-index cache control
+void InvalidateCategoryCache(void);
+
 // Functions in: category.c
 int CountCategories(Category *head[], int location);
 void ClearCategories(Category *head[], int location);

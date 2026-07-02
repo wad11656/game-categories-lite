@@ -58,6 +58,15 @@ int global_pos = 0;
 
 Category *cat_list[2] = { NULL, NULL };
 
+/* Category-index cache validity per location (see AddVshItemPatched).
+ * Invalidated by InvalidateCategoryCache() on config resets. */
+int cat_cache_valid[2] = { 0, 0 };
+
+void InvalidateCategoryCache(void) {
+    cat_cache_valid[MEMORY_STICK] = 0;
+    cat_cache_valid[INTERNAL_STORAGE] = 0;
+}
+
 static const char* GC_PREFIX = "gc";
 
 static const char* GC_SYSCONF_MODE = "gc0";
@@ -351,8 +360,20 @@ int AddVshItemPatched(void *arg, int topitem, SceVshItem *item) {
         }
 
         if(config.mode != MODE_FOLDER) {
-            ClearCategories(cat_list, location);
-            IndexCategories(cat_list, "xxx:/PSP/GAME", location);
+            /* Reuse the category index across re-adds. Re-indexing walks
+             * every folder under /PSP/GAME with several IO probes each,
+             * which takes seconds on a large stick -- and the XMB re-adds
+             * the Memory Stick item on every sleep/wake resume, making the
+             * category entries appear seconds after the rest of the column.
+             * The cache is invalidated on config resets (save_config's fake
+             * MS reinsertion path); a VSH reset naturally starts cold. A
+             * stick swapped while the PSP sleeps keeps the old index until
+             * the next VSH reset or config change. */
+            if (!cat_cache_valid[location]) {
+                ClearCategories(cat_list, location);
+                IndexCategories(cat_list, "xxx:/PSP/GAME", location);
+                cat_cache_valid[location] = 1;
+            }
         }
 
         // make a backup of the id and action_arg
