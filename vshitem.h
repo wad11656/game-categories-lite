@@ -43,4 +43,6 @@ extern Category *cat_list[2];
 
 extern int global_pos;
 
+int ReplayGameContextDisplay(void *xmb_arg0);
+
 #endif /* VSHITEM_H_ */

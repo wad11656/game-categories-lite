@@ -81,6 +81,7 @@ extern "C" {
 
 char *sceKernelGetUMDData(void);
 int kuKernelGetModel(void);
+int kuKernelFindModuleByName(const char *modname, SceModule2 *mod);
 /* sceKernelQuerySystemCall is provided by pspsdk's pspintrman_kernel.h
    (with `int` return type); the local re-declaration here conflicted with
    modern pspsdk and was unused inside categories_lite, so it's been removed. */

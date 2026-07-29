@@ -1,5 +1,7 @@
 TARGET = category_lite
-DEBUG ?= 1
+# Release builds should not synchronously write the very chatty XMB diagnostic
+# log. Use `make DEBUG=1` only when producing a troubleshooting build.
+DEBUG ?= 0
 STUBS = imports.o scePaf.o func_stubs.o
 CATEGORY_MODES = multims.o context.o vshitem.o mode.o selection.o
 HELPER = clearcache.o  logger.o utils.o config.o filter.o
@@ -34,7 +36,7 @@ EXTRA_WARNS= -Wextra -Wfloat-equal -Wundef -Wshadow -Wpointer-arith -Wwrite-stri
 CFLAGS =-O2 -Wall -G0 -std=c99 -fshort-wchar -fcommon $(EXTRA_WARNS)
 
 ifeq ($(DEBUG), 1)
-CFLAGS+=-DDEBUG
+CFLAGS+=-DDEBUG -DGCLITE_LOGGING=1
 endif
 
 ifeq ($(BENCHMARK), 1)

@@ -38,6 +38,31 @@ int model;
 int game_plug = 0;
 int sysconf_plug = 0;
 
+/* Adrenaline (PSP-emu on PS Vita) detection, via Epinephrine's EPI-XmbControl
+   module. Adrenaline's "System Storage" (ef0:) is opened with the normal Memory
+   Stick game action, not the PSP-Go internal-storage action -- so the ef0
+   handling in vshitem.c/gcread.c is gated on this to leave real PSP-Go hardware
+   untouched. Detected LAZILY on first use (gc_adrenaline()) rather than at
+   vsh_module load: walking the module list during the vsh_module start handler
+   (GC Lite must be first in vsh.txt, so it runs at a delicate point) crashed the
+   XMB before it built. -1 = not yet detected. */
+int g_adrenaline = -1;
+
+int gc_adrenaline(void) {
+    if (g_adrenaline < 0) {
+        /* kuKernelFindModuleByName fills the kernel's OWN SceModule, which on
+           6.61 is larger than our (or the SDK's) truncated SceModule2 typedef.
+           Copying it into a right-sized struct overflowed the buffer -- harmless
+           on hidexmb's stack copy, but here (static BSS) it smashed adjacent
+           globals and corrupted later ef0/EPI operations. Give it generous
+           slack so the copy can never overflow. */
+        static char epi[1024];
+        g_adrenaline = (kuKernelFindModuleByName("EPI-XmbControl", (SceModule2 *)epi) >= 0);
+        kprintf("adrenaline (EPI-XmbControl) present: %i\n", g_adrenaline);
+    }
+    return g_adrenaline;
+}
+
 char currfw[5];
 
 //TODO: remove it from here
@@ -111,16 +136,22 @@ int OnModuleStart(SceModule2 *mod) {
 }
 
 int module_start(SceSize args UNUSED, void *argp UNUSED) {
+#if defined(DEBUG) && GCLITE_LOGGING
     const char *src = "xx0:/category_lite.log";
+    static const char build_id[] =
+            "Game Categories Lite FOLDER-JAL-FIX-14-NOLOG starting\n";
     char *dest = filebuf;
+#endif
 
     model = kuKernelGetModel();
+#if defined(DEBUG) && GCLITE_LOGGING
     while((*dest++ = *src++)) {
         /* copy */
     }
     SET_DEVICENAME(filebuf, model == 4 ? INTERNAL_STORAGE : MEMORY_STICK);
     // paf isn't loaded yet
-    kwrite(filebuf, "Game Categories Lite v1.7-js1 starting\n", 20);
+    kwrite(filebuf, build_id, sizeof(build_id) - 1);
+#endif
     // Determine fw group
     u32 devkit = sceKernelDevkitVersion();
     if (devkit == 0x06020010) {

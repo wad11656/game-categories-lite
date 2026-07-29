@@ -228,4 +228,7 @@ GCPatches *GetPatches(int fw_group);
 // Functions in: clearcache.S
 void ClearCaches();
 
+// Functions in: main.c -- lazy Adrenaline (EPI-XmbControl) detection
+int gc_adrenaline(void);
+
 #endif /* CATEGORY_LITE_ */

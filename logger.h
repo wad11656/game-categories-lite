@@ -24,7 +24,9 @@
 #include <stdio.h>
 #include "psppaf.h"
 
+#ifndef GCLITE_LOGGING
 #define GCLITE_LOGGING 0
+#endif
 
 #if defined(DEBUG) && GCLITE_LOGGING
 

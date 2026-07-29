@@ -38,6 +38,7 @@
 extern int game_plug;
 extern int model;
 extern int context_mode;
+
 extern int sysconf_hint_mode;
 extern unsigned long long sysconf_hint_time;
 
@@ -350,6 +351,14 @@ int AddVshItemPatched(void *arg, int topitem, SceVshItem *item) {
         kprintf("got %s, location: %i, id: %i\n", item->text, location, item->id);
         category[0] = '\0';
 
+        /* Detect only when the System Storage row arrives. If GC is loaded
+           before EPI-XmbControl, probing on the earlier Memory Stick row can
+           cache a false negative before EPI injects ef0. The injected msg_em
+           callback itself proves EPI has reached its AddVshItem path. */
+        if (location == INTERNAL_STORAGE) {
+            gc_adrenaline();
+        }
+
         if (vsh_items[location]) {
             sce_paf_private_free(vsh_items[location]);
             vsh_items[location] = NULL;
@@ -402,6 +411,19 @@ int AddVshItemPatched(void *arg, int topitem, SceVshItem *item) {
     return AddVshItem(arg, topitem, item);
 }
 
+/* Which firmware game action_arg to hand the game_plugin for `location`.
+   On Adrenaline, System Storage (ef0) opens with the Memory Stick game action
+   (the PSP-Go internal-storage action is a no-op there -- the game_plugin loads
+   but never browses); GC's own ef0: path-rewriting in gcread.c then redirects
+   the reads to ef0. On real PSP-Go, g_adrenaline is 0 so the native arg is used
+   and behaviour is unchanged. */
+static int game_action_arg_for(int location) {
+    if (location == INTERNAL_STORAGE && gc_adrenaline()) {
+        return vsh_action_arg[MEMORY_STICK];
+    }
+    return vsh_action_arg[location];
+}
+
 int ExecuteActionPatched(int action, int action_arg) {
     int location;
     kprintf("action: %i, action_arg: %i\n", action, action_arg);
@@ -409,7 +431,7 @@ int ExecuteActionPatched(int action, int action_arg) {
         location = PatchExecuteActionForMultiMs(&action, &action_arg);
         if(location >= 0) {
             last_action_arg[location] = action_arg;
-            action_arg = vsh_action_arg[location];
+            action_arg = game_action_arg_for(location);
         }
     } else if(config.mode == MODE_CONTEXT_MENU) {
         location = PatchExecuteActionForContext(&action, &action_arg);
@@ -417,10 +439,32 @@ int ExecuteActionPatched(int action, int action_arg) {
             return 0;
         } else if(location >= 0) {
             last_action_arg[location] = action_arg;
-            action_arg = vsh_action_arg[location];
+            action_arg = game_action_arg_for(location);
 
             // simulate MS selection
             action = GAME_ACTION;
+        }
+    } else if(config.mode == MODE_FOLDER && action == GAME_ACTION) {
+        /* Folder mode leaves the firmware storage rows intact, so unlike the
+           other two modes it has no synthetic action from which to update
+           global_pos. On Adrenaline, Epinephrine translates BOTH rows to the
+           normal Memory Stick action before this chained hook runs; the actual
+           ms0/ef0 base supplied by game_plugin is therefore the only reliable
+           discriminator and ReturnBasePathPatched selects it. Native PSP-Go
+           retains distinct action arguments, so handle those here. */
+        if(gc_adrenaline()) {
+            kprintf("FOLDER-DRIVE-11: action=%i; deferring location to base path\n",
+                    action_arg);
+        } else if(action_arg == vsh_action_arg[MEMORY_STICK]) {
+            global_pos = MEMORY_STICK;
+            category[0] = '\0';
+            kprintf("FOLDER-DRIVE-11: selected Memory Stick action=%i\n",
+                    action_arg);
+        } else if(action_arg == vsh_action_arg[INTERNAL_STORAGE]) {
+            global_pos = INTERNAL_STORAGE;
+            category[0] = '\0';
+            kprintf("FOLDER-DRIVE-11: selected System Storage action=%i\n",
+                    action_arg);
         }
     }
     kprintf("sending action: %i, action_arg: %i\n", action, action_arg);
@@ -518,12 +562,86 @@ wchar_t* scePafGetTextPatched(void *arg, char *name) {
 }
 
 
+static void *game_context_arg = NULL;
+static char *game_context_page = NULL;
+static char *game_context_plane = NULL;
+static char *game_context_mlist = NULL;
+static void *game_context_temp1 = NULL;
+static void *game_context_temp2 = NULL;
+static int game_context_template_valid = 0;
+
+/* Adrenaline 8 runs the 6.61 vsh_module. These are runtime-relative
+   relationships observed in the real Memory Stick DisplayContext call:
+
+       common-GUI object = OnXmbPush arg0 - 0xA070
+       page              = vsh_module + 0x4429C
+       plane             = vsh_module + 0x447C4
+       menu list         = vsh_module + 0x447C8
+
+   ASLR moves both bases, so derive them at the moment System Storage is
+   activated. This removes the need to open Memory Stick once merely to cache
+   those same four values. Keep the captured template as a conservative
+   fallback/reference for any subsequent attempt in the same XMB session. */
+#define ADRENALINE_CONTEXT_OBJECT_DELTA 0xA070
+#define ADRENALINE_CONTEXT_PAGE_OFFSET  0x4429C
+#define ADRENALINE_CONTEXT_PLANE_OFFSET 0x447C4
+#define ADRENALINE_CONTEXT_MLIST_OFFSET 0x447C8
+
 int sceVshCommonGuiDisplayContextPatched(void *arg, char *page, char *plane, int width, char *mlist, void *temp1, void *temp2) {
+    int gamecats = context_gamecats;
+
+    kprintf("DisplayContext: page=[%s] plane=[%s] width=%i gamecats=%i global_pos=%i\n",
+            page ? page : "(null)", plane ? plane : "(null)", width, context_gamecats, global_pos);
+    kprintf("DisplayContextArgs: arg=%08X page=%08X plane=%08X mlist=%08X temp1=%08X temp2=%08X\n",
+            (u32)arg, (u32)page, (u32)plane, (u32)mlist, (u32)temp1, (u32)temp2);
+    if (gamecats && global_pos == MEMORY_STICK) {
+        game_context_arg = arg;
+        game_context_page = page;
+        game_context_plane = plane;
+        game_context_mlist = mlist;
+        game_context_temp1 = temp1;
+        game_context_temp2 = temp2;
+        game_context_template_valid = 1;
+        kprintf("SYSCTX-DIRECT-8: captured display template\n");
+    }
     if (context_gamecats || (context_mode > 0 && lang_width[lang_id])) {
         width = 1;
         context_gamecats = 0;
     }
     return sceVshCommonGuiDisplayContext_func(arg, page, plane, width, mlist, temp1, temp2);
+}
+
+int ReplayGameContextDisplay(void *xmb_context_arg) {
+    void *arg = game_context_arg;
+    char *page = game_context_page;
+    char *plane = game_context_plane;
+    char *mlist = game_context_mlist;
+    void *temp1 = game_context_temp1;
+    void *temp2 = game_context_temp2;
+
+    if (!game_context_template_valid) {
+        if (!gc_adrenaline() || patch_index != FW_660 ||
+                !vsh_text_addr || !xmb_context_arg) {
+            kprintf("SYSCTX-DIRECT-8: cannot derive display template adrenaline=%i fw=%i vsh=%08X xmb=%08X\n",
+                    gc_adrenaline(), patch_index, vsh_text_addr, (u32)xmb_context_arg);
+            return -1;
+        }
+
+        arg = (void *)((u32)xmb_context_arg - ADRENALINE_CONTEXT_OBJECT_DELTA);
+        page = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PAGE_OFFSET);
+        plane = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PLANE_OFFSET);
+        mlist = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_MLIST_OFFSET);
+        temp1 = NULL;
+        temp2 = NULL;
+        kprintf("SYSCTX-DIRECT-8: derived display template from XMB runtime\n");
+    } else {
+        kprintf("SYSCTX-DIRECT-8: using captured Memory Stick display template\n");
+    }
+
+    kprintf("SYSCTX-DIRECT-8: replaying arg=%08X page=%08X plane=%08X mlist=%08X\n",
+            (u32)arg, (u32)page, (u32)plane, (u32)mlist);
+    return sceVshCommonGuiDisplayContextPatched(
+            arg, page, plane, 1, mlist, temp1, temp2);
 }
 
 void PatchVshmain(u32 text_addr) {

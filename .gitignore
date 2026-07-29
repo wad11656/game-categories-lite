@@ -10,8 +10,8 @@
 *.o
 *.elf
 *.prx
-# ...but DO track the canonical ready-to-flash binary in release/
-!release/*.prx
+# ...but DO track only the canonical ready-to-flash binary in release/
+!release/category_lite.prx
 
 # Specific generated outputs
 /category_lite.elf

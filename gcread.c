@@ -112,6 +112,8 @@ int is_category_folder(SceIoDirent *dir) {
 
 SceUID sceIoDopenPatched(const char *path) {
     SceUID fd = sceIoDopen(path);
+    int is_folder_root = path && config.mode == MODE_FOLDER &&
+            sce_paf_private_strcmp(path + 4, GAME_FOLDER) == 0;
 
     if(path) {
         sce_paf_private_strncpy(current_path, path, sizeof(current_path) - 1);
@@ -131,7 +133,7 @@ SceUID sceIoDopenPatched(const char *path) {
         *opened_path = '\0';
     }
 
-    if(config.mode == MODE_FOLDER && sce_paf_private_strcmp(path + 4, GAME_FOLDER) == 0) {
+    if(is_folder_root) {
 #ifdef BENCHMARK
         display_flag = 0;
         sceRtcGetCurrentTick(&start_mtime);
@@ -139,7 +141,7 @@ SceUID sceIoDopenPatched(const char *path) {
         sce_paf_private_strcpy(opened_path, path);
         ClearCategories(folder_list, global_pos);
         uncategorized = 0;
-        game_dfd = fd;
+        openfd = -1;
     }
 
     kprintf("opened dir, path: [%s], fd: %08X\n", path, fd);
@@ -153,13 +155,32 @@ SceUID sceIoDopenPatched(const char *path) {
         kprintf("Opening fake dir: [%s], fd: %08X\n", user_buffer, fakefd);
         fd = fakefd;
     }
+    /* Track the descriptor returned to game_plugin, not Adrenaline's
+       kernel-only descriptor saved in realfd. sceIoDreadPatchedFolder receives
+       this returned value and maps it back before performing the real scan. */
+    if(is_folder_root) {
+        game_dfd = fd;
+        kprintf("FOLDER-FD-9: game root presented=%08X real=%08X loc=%i\n",
+                game_dfd, game_dfd == fakefd ? realfd : game_dfd, global_pos);
+    }
     return fd;
 }
 
 int sceIoDreadPatchedFolder(SceUID fd, SceIoDirent *dir) {
     int res;
+    int is_game_root = (fd == game_dfd);
+    SceUID readfd = fd;
 
-    if (fd == game_dfd) {
+    /* Adrenaline's ms/ef drivers can return a kernel descriptor. dopen gives
+       game_plugin a harmless user descriptor, so translate it back here just
+       like sceIoDreadPatched does in the other category modes. */
+    if (fd == fakefd) {
+        readfd = realfd;
+    }
+
+    if (is_game_root) {
+        kprintf("FOLDER-FD-9: root read presented=%08X real=%08X loc=%i\n",
+                fd, readfd, global_pos);
         while (1) {
             if (openfd >= 0) {
                 res = sceIoDread(openfd, dir);
@@ -182,7 +203,7 @@ int sceIoDreadPatchedFolder(SceUID fd, SceIoDirent *dir) {
                 }
             }
 
-            res = sceIoDread(fd, dir);
+            res = sceIoDread(readfd, dir);
 
             if (res > 0) {
                 kprintf("checking %s\n", dir->d_name);
@@ -223,7 +244,7 @@ int sceIoDreadPatchedFolder(SceUID fd, SceIoDirent *dir) {
         }
     }
 
-    return sceIoDread(fd, dir);
+    return sceIoDread(readfd, dir);
 }
 
 int sceIoDreadPatched(SceUID fd, SceIoDirent *dir) {
@@ -279,11 +300,41 @@ int gcGetStatIso(SceIoStat *stat) {
     return sceIoGetstat(user_buffer, stat);
 }
 
+SceUID sceIoOpenPatched(const char *file, int flags, SceMode mode) {
+    SceUID ret;
+
+    kprintf("open: [%s]\n", file);
+    /* Adrenaline System Storage: we hand the game_plugin the Memory Stick game
+       action (arg 2), so when it opens a game's EBOOT for its icon/SFO (and for
+       the launch) it builds an ms0: path. The directory listing is redirected to
+       ef0 via ReturnBasePathPatched, but this open is not -- so an ef0 category
+       game's EBOOT read hits ms0 (where it doesn't exist) and shows corrupt /
+       won't launch. When an ef0 item is active, redirect ms0:/PSP/GAME opens to
+       ef0. Gated on Adrenaline; real PSP-Go (arg 9, native ef0) never hits this. */
+    if (global_pos == INTERNAL_STORAGE && file &&
+            file[0] == 'm' && file[1] == 's' && file[2] == '0' && file[3] == ':' &&
+            sce_paf_private_strncmp(file + 4, GAME_FOLDER, 9) == 0 && gc_adrenaline()) {
+        char redir[256];
+        sce_paf_private_strncpy(redir, file, sizeof(redir) - 1);
+        redir[sizeof(redir) - 1] = '\0';
+        SET_DEVICENAME(redir, INTERNAL_STORAGE);
+        kprintf("open redirected: [%s]\n", redir);
+        ret = sceIoOpen(redir, flags, mode);
+        kprintf("FOLDER-JAL-FIX-13: open result=%08X redirected=1\n",
+                ret);
+        return ret;
+    }
+    ret = sceIoOpen(file, flags, mode);
+    kprintf("FOLDER-JAL-FIX-13: open result=%08X redirected=0\n", ret);
+    return ret;
+}
+
 int sceIoGetstatPatched(char *file, SceIoStat *stat) {
     int ret;
 
     kprintf("checking [%s]\n", file);
     ret = sceIoGetstat(file, stat);
+    kprintf("FOLDER-JAL-FIX-13: getstat initial result=%08X\n", ret);
     if(ret < 0 && *category) {
         // lets verify if it was trying to open a ISO category
         sce_paf_private_strcpy(user_buffer, GAME_FOLDER);
@@ -307,6 +358,25 @@ int sceIoGetstatPatched(char *file, SceIoStat *stat) {
 
 char *ReturnBasePathPatched(char *base) {
     kprintf("orig base: [%s]\n", base);
+    /* Epinephrine normalizes both Game rows to action 15/2 before GC Lite's
+       chained ExecuteAction hook runs, but game_plugin still supplies the
+       correct physical root here. In Folder mode, select the matching folder
+       list from this authoritative path before enumeration/categorization. */
+    if(config.mode == MODE_FOLDER && base &&
+            sce_paf_private_strcmp(base + 4, GAME_FOLDER) == 0 &&
+            gc_adrenaline()) {
+        if((base[0] == 'e' || base[0] == 'E') &&
+                (base[1] == 'f' || base[1] == 'F')) {
+            global_pos = INTERNAL_STORAGE;
+            category[0] = '\0';
+            kprintf("FOLDER-DRIVE-11: base selected System Storage\n");
+        } else if((base[0] == 'm' || base[0] == 'M') &&
+                (base[1] == 's' || base[1] == 'S')) {
+            global_pos = MEMORY_STICK;
+            category[0] = '\0';
+            kprintf("FOLDER-DRIVE-11: base selected Memory Stick\n");
+        }
+    }
     // only do the patch if a category is being accessed
     if(*category && base && sce_paf_private_strcmp(base + 4, GAME_FOLDER) == 0) {
         sce_paf_private_strcpy(mod_base, base);
@@ -323,6 +393,20 @@ char *ReturnBasePathPatched(char *base) {
         kprintf("modified base: [%s]\n", mod_base);
         base = mod_base;
     }
+    /* Adrenaline System Storage, Uncategorized: there is no category name to
+       trigger the per-category redirect above, and we handed the game_plugin the
+       Memory Stick game action (arg 2), so it would browse ms0. Force the device
+       to ef0 for the plain /PSP/GAME base so the uncategorized listing (and any
+       launch from it) hits System Storage instead. Gated on Adrenaline, so real
+       PSP-Go -- which browses ef0 natively via the internal-storage action -- is
+       untouched. */
+    else if(global_pos == INTERNAL_STORAGE && base &&
+            sce_paf_private_strcmp(base + 4, GAME_FOLDER) == 0 && gc_adrenaline()) {
+        sce_paf_private_strcpy(mod_base, base);
+        SET_DEVICENAME(mod_base, INTERNAL_STORAGE);
+        kprintf("modified base (adrenaline ef0 uncat): [%s]\n", mod_base);
+        base = mod_base;
+    }
     return base;
 }
 
@@ -331,7 +415,7 @@ int sceIoDclosePatched(SceUID fd) {
     if(config.mode == MODE_FOLDER && fd == game_dfd) {
         // add the uncategorized content in folder mode
         if(uncategorized) {
-            AddCategory(folder_list, lang_container.msg_uncategorized, 1, 0);
+            AddCategory(folder_list, lang_container.msg_uncategorized, 1, global_pos);
         }
         game_dfd = -1;
     }
@@ -356,6 +440,7 @@ void PatchGamePluginForGCread(u32 text_addr) {
     MAKE_STUB(text_addr + patches.io_dopen_stub[patch_index], sceIoDopenPatched);
     MAKE_STUB(text_addr + patches.io_dclose_stub[patch_index], sceIoDclosePatched);
     MAKE_STUB(text_addr + patches.io_getstat_stub[patch_index], sceIoGetstatPatched);
+    MAKE_STUB(text_addr + patches.io_open_stub[patch_index], sceIoOpenPatched);
 
     // hook the base path creation
     MAKE_JUMP(text_addr + patches.base_path[patch_index], ReturnBasePathPatched);

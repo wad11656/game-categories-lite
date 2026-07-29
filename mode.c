@@ -57,8 +57,19 @@ static int (*scePafAddGameItems)(void *unk, int count, void *unk2);
 /* Functions */
 int CategorizeGamePatched(void *unk, int folder, int unk2) {
     int i;
-    u32 *array = (u32 *) *(u32 *) ((*(u32 *) (text_addr_game + patches.struct_addr[patch_index])) + ((u32) folder << 2));
-    char *title = (char *) array[68 / 4];
+    u32 folder_table;
+    u32 array_addr;
+    u32 *array;
+    char *title;
+
+    kprintf("FOLDER-FD-9: categorize entry folder=%i loc=%i list=%08X\n",
+            folder, global_pos, (u32)folder_list[global_pos]);
+    folder_table = *(u32 *) (text_addr_game + patches.struct_addr[patch_index]);
+    array_addr = *(u32 *) (folder_table + ((u32) folder << 2));
+    array = (u32 *)array_addr;
+    kprintf("FOLDER-FD-9: categorize table=%08X array=%08X\n",
+            folder_table, array_addr);
+    title = (char *) array[68 / 4];
     kprintf("called\n");
     Category *p = GetNextCategory(folder_list, NULL, global_pos);
 
@@ -73,7 +84,11 @@ int CategorizeGamePatched(void *unk, int folder, int unk2) {
             }
         }
 
-        p = GetNextCategory(folder_list, p, 0);
+        /* Continue walking the list for the storage currently open. The
+           original hardcoded Memory Stick location crosses from an ef0 node
+           into folder_list[0], so System Storage either miscategorizes after
+           its first folder or dereferences a node from the wrong list. */
+        p = GetNextCategory(folder_list, p, global_pos);
     }
 
     /* uncategorized */
@@ -84,6 +99,8 @@ int scePafAddGameItemsPatched(void *unk, int count, void *unk2) {
     kprintf("called, count: %i\n", count);
     if(count == 3) {
         count = CountCategories(folder_list, global_pos);
+        kprintf("FOLDER-FD-9: replacing folder count with %i for loc=%i\n",
+                count, global_pos);
     }
     return scePafAddGameItems(unk, count, unk2);
 }
@@ -342,6 +359,21 @@ ToggleCategoryPatch ToggleCategoryPatches_66x[] = {
 
 static u32 backup[sizeof(ToggleCategoryPatches_620) / sizeof(ToggleCategoryPatch)];
 
+/*
+ * ToggleCategoryPatch::opcode is overloaded: literal MIPS instructions are
+ * stored directly, while these four C callback addresses must be encoded as
+ * JAL instructions. The original code guessed which kind it had by checking
+ * whether the address began with 0x08. Adrenaline can load this PRX in the
+ * 0x09xxxxxx range, so that guess turns a callback pointer into an invalid raw
+ * instruction. Identify the callback entries by value instead.
+ */
+static int IsToggleCategoryCall(u32 opcode) {
+    return opcode == (u32)CategorizeGamePatched ||
+            opcode == (u32)scePafAddGameItemsPatched ||
+            opcode == (u32)GetCategoryTitle ||
+            opcode == (u32)GetGameSubtitle;
+}
+
 int ToggleCategoryMode(int mode) {
     int total;
     ToggleCategoryPatch *ToggleCategoryPatches;
@@ -368,19 +400,35 @@ int ToggleCategoryMode(int mode) {
         for (int i = 0; i < total; i++) {
             u32 addr = text_addr_game + ToggleCategoryPatches[i].addr;
             u32 opcode = ToggleCategoryPatches[i].opcode;
+            int is_call = IsToggleCategoryCall(opcode);
             backup[i] = _lw(addr);
-            if ((opcode & 0xFF000000) == 0x08000000) {
+            kprintf("FOLDER-JAL-FIX-13: patch[%i] addr=%08X old=%08X "
+                    "spec=%08X kind=%s\n",
+                    i, addr, backup[i], opcode,
+                    is_call ? "call" : "word");
+            if (is_call) {
                 if(opcode == (u32)scePafAddGameItemsPatched) {
                     scePafAddGameItems = (void *)U_EXTRACT_CALL(addr);
+                    kprintf("FOLDER-JAL-FIX-13: add-items source=%08X "
+                            "is-jal=%i target=%08X\n",
+                            backup[i], (backup[i] & 0xFC000000) == 0x0C000000,
+                            (u32)scePafAddGameItems);
                 } else if(opcode == (u32)CategorizeGamePatched) {
                     CategorizeGame = (void *)U_EXTRACT_CALL(addr);
+                    kprintf("FOLDER-JAL-FIX-13: categorize source=%08X "
+                            "is-jal=%i target=%08X\n",
+                            backup[i], (backup[i] & 0xFC000000) == 0x0C000000,
+                            (u32)CategorizeGame);
                 }
                 MAKE_CALL(addr, opcode);
             } else {
                 _sw(opcode, addr);
             }
+            kprintf("FOLDER-JAL-FIX-13: patch[%i] live=%08X\n",
+                    i, _lw(addr));
         }
         ClearCachesForUser();
+        kprintf("FOLDER-JAL-FIX-13: enabled %i patches\n", total);
         return 0;
     }
 
