@@ -1,4 +1,4 @@
-Game Categories Lite v1.81
+Game Categories Lite v1.82
 
 The main differences in this version are the re-stabilization of the visibility of the
 Game Categories options listed within the System Settings (compared to v1.7), as well as 
