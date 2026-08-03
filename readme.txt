@@ -84,6 +84,8 @@ Known issues:
 ------------------------------------------
 Changelog:
 ------------------------------------------
+v1.82:
+[+]Epinephrine (Adrenaline) compatibility.
 v1.81:
 [+]Compatibility with hidden XMB categories set with github.com/wad11656/XMB-Item-Hider-PSP
 v1.8:
