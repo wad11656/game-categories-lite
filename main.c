@@ -38,6 +38,15 @@ int model;
 int game_plug = 0;
 int sysconf_plug = 0;
 
+/* Set when the XMB Item Hider plugin (module name "XMBIH") starts. GC Lite is
+   required to be first in vsh.txt, so our start-module handler sees XMBIH load
+   (when it's enabled) before the XMB builds its columns. vshitem.c's
+   xmbih_is_active() reads this flag instead of probing a fixed vsh address or
+   walking the module list -- both of which fault on Adrenaline/Epinephrine <=7
+   (out-of-bounds vsh read / module-walk race during boot). Value 0 = XMBIH not
+   loaded (or not enabled) -> XMBIH-compat shift disabled, no unsafe probe. */
+int g_xmbih_present = 0;
+
 /* Adrenaline (PSP-emu on PS Vita) detection, via Epinephrine's EPI-XmbControl
    module. Adrenaline's "System Storage" (ef0:) is opened with the normal Memory
    Stick game action, not the PSP-Go internal-storage action -- so the ef0
@@ -77,6 +86,12 @@ static STMOD_HANDLER previous;
 
 int OnModuleStart(SceModule2 *mod) {
     //kprintf(">> %s: loading %s, text_addr: %08X\n", __func__, mod->modname, mod->text_addr);
+	/* Note XMBIH's presence the moment it loads -- cheap strcmp, no module walk
+	   or vsh read (both unsafe on EPI <=7). */
+	if (sce_paf_private_strcmp(mod->modname, "XMBIH") == 0) {
+	    g_xmbih_present = 1;
+	    kprintf("EPI7-DIAG: XMBIH module detected at load\n");
+	}
 	if (sce_paf_private_strcmp(mod->modname, "game_plugin_module") == 0) {
 
 	    kprintf("loading %s, text_addr: %08X\n", mod->modname, mod->text_addr);

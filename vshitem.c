@@ -45,6 +45,10 @@ extern unsigned long long sysconf_hint_time;
 /* Captured in main.c's OnModuleStart vsh_module branch. */
 extern u32 vsh_text_addr;
 
+/* Set in main.c when the "XMBIH" module loads (GC Lite is first in vsh.txt, so
+   we see it before the XMB builds). Used instead of probing vsh memory. */
+extern int g_xmbih_present;
+
 /* Shared scratch buffer (used for transient UTF-8/wide conversion across
    vshitem.c / sysconf.c / mode.c). Old GCC defaults (-fcommon) merged the
    same-named globals in each TU into one; modern GCC (>=10) requires
@@ -232,11 +236,16 @@ static int count_pregame_hides_in_ini(void) {
 }
 
 static int xmbih_is_active(void) {
-    u32 instr;
-    if (!vsh_text_addr)
-        return 0;
-    instr = *(u32 *)(vsh_text_addr + XMBIH_COUNT_PATCH_OFFSET);
-    return ((instr >> 26) & 0x3F) == MIPS_OPCODE_JAL;
+    /* Was: a raw read of vsh_text_addr+0x20890 (XMBIH's patch signature). That
+       faults on firmwares whose vsh is sized differently (Adrenaline/Epinephrine
+       <=7), crashing the XMB at boot even with XMBIH absent -- and it runs very
+       early (right after vsh patching, while modules are still loading), so a
+       module-list walk (kuKernelFindModuleByName) races and faults there too.
+       Instead we record XMBIH's presence when its module loads (main.c
+       OnModuleStart), so this is just a flag read -- safe on every firmware.
+       The pre-Game shift still comes from xmbih.ini, so XMBIH-compat behaviour
+       is unchanged wherever XMBIH actually runs. */
+    return g_xmbih_present;
 }
 
 static int is_ark_custom_item(const char *text) {
@@ -277,19 +286,89 @@ static int extras_hidden_by_fake_region(void) {
     return fake_region_hides_extras;
 }
 
+/* Prime the fake-region detection from a SAFE early context (main.c module_start)
+   -- BEFORE the vsh-build phase where load_xmbih_shift runs. At that later point,
+   sctrlHENFindFunction / GetSEConfigEx fault on Adrenaline/Epinephrine <=7 (same
+   early-boot fragility that killed the old vsh probe). extras_hidden_by_fake_region
+   caches (fake_region_loaded), so the later call in load_xmbih_shift is just a
+   flag read. Safe no-op on firmwares where it already worked. */
+void gc_prime_xmbih_detection(void) {
+    (void)extras_hidden_by_fake_region();
+}
+
+/* Read the Game column XMBIH actually resolved, from xmbih.state -- written by
+   XMBIH's module_start only once it is certain it will patch, and removed on
+   every inert path (unsupported firmware, USE_PLUGIN=0). Returns -1 when the
+   file is absent or malformed, which unambiguously means "XMBIH applied no
+   shift". Returns the topitem otherwise. */
+static int read_xmbih_state_topitem(void) {
+    static char buf[64];
+    const char *path;
+    SceUID fd;
+    int n, i;
+
+    path = (model == 4) ? "ef0:/SEPLUGINS/xmbih.state"
+                        : "ms0:/SEPLUGINS/xmbih.state";
+    fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    n = sceIoRead(fd, buf, sizeof(buf) - 1);
+    sceIoClose(fd);
+    /* CONSUME it. XMBIH rewrites the file every boot in module_start, before we
+       ever read it, so deleting here makes a stale value impossible: if XMBIH is
+       later uninstalled or disabled in PLUGINS.txt -- and so never runs to clean
+       up after itself -- the next boot simply finds no file and we correctly
+       apply no shift, instead of trusting a number from a previous boot. */
+    sceIoRemove(path);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+
+    for (i = 0; i + 13 < n; i++) {
+        if (sce_paf_private_strncmp(buf + i, "GAME_TOPITEM=", 13) == 0) {
+            char c = buf[i + 13];
+            if (c >= '0' && c <= '7')
+                return c - '0';
+            return -1;
+        }
+    }
+    return -1;
+}
+
 static void load_xmbih_shift(void) {
-    int shift;
+    int shift, published;
 
     xmbih_shift_loaded = 1;
     shift = 0;
 
-    if (xmbih_is_active())
-        shift = count_pregame_hides_in_ini();
+    /* Preferred path: take the number straight from XMBIH. Deriving it here
+       from xmbih.ini is a SECOND guess that has to agree with what XMBIH really
+       did, and on Adrenaline/Epinephrine <=7 it didn't -- XMBIH's module_start
+       bailed on the unlisted 6.61 devkit and hid nothing, while this code saw
+       its module load, read HIDE_ALL_PHOTO=2, and moved Games to a column that
+       was never vacated. The state file is written only when XMBIH will
+       actually patch, so it cannot disagree. */
+    published = read_xmbih_state_topitem();
+    kprintf("xmbih.state published=%i (>=0 means authoritative)\n", published);
+    if (published >= 0) {
+        xmbih_game_topitem = published;
+        kprintf("xmbih game_topitem=%i (from state file)\n", xmbih_game_topitem);
+        return;
+    }
 
-    if (extras_hidden_by_fake_region())
-        shift++;
+    /* Fallback for an XMBIH too old to publish xmbih.state. Still gated on
+       XMBIH being loaded: when it isn't (e.g. EPI<=7 with xmbih.prx disabled),
+       skip the xmbih.ini read and the SEConfig lookup entirely -- both fault at
+       this early boot point there, and there's nothing to sync. */
+    if (xmbih_is_active()) {   /* g_xmbih_present */
+        shift = count_pregame_hides_in_ini();
+        if (extras_hidden_by_fake_region())
+            shift++;
+    }
     if (shift > 0 && shift <= 4)
         xmbih_game_topitem = 5 - shift;
+    kprintf("xmbih fallback: active=%i shift=%i game_topitem=%i\n",
+            xmbih_is_active(), shift, xmbih_game_topitem);
 }
 
 int get_item_location(int topitem, SceVshItem *item) {
@@ -337,6 +416,11 @@ int AddVshItemPatched(void *arg, int topitem, SceVshItem *item) {
 
     if (!xmbih_shift_loaded)
         load_xmbih_shift();
+
+    /* The number CL actually receives, vs the one it is looking for. If these
+       never line up for the Game items, that mismatch is the whole bug. */
+    kprintf("add: topitem=%i want_game=%i text=%s\n",
+            topitem, xmbih_game_topitem, item->text);
 
     if (topitem == 1 && is_ark_custom_item(item->text) &&
             extras_hidden_by_fake_region()) {

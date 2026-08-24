@@ -231,4 +231,7 @@ void ClearCaches();
 // Functions in: main.c -- lazy Adrenaline (EPI-XmbControl) detection
 int gc_adrenaline(void);
 
+// Functions in: vshitem.c -- prime fake-region detection from a safe early point
+void gc_prime_xmbih_detection(void);
+
 #endif /* CATEGORY_LITE_ */
