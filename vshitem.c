@@ -44,6 +44,7 @@ extern unsigned long long sysconf_hint_time;
 
 /* Captured in main.c's OnModuleStart vsh_module branch. */
 extern u32 vsh_text_addr;
+extern u32 vsh_text_size;
 
 /* Set in main.c when the "XMBIH" module loads (GC Lite is first in vsh.txt, so
    we see it before the XMB builds). Used instead of probing vsh memory. */
@@ -132,6 +133,15 @@ typedef struct {
 
 typedef SEConfig *(*GetSEConfigExFunc)(SEConfig *config, int size);
 
+/* Imported DIRECTLY by NID (see imports.S) rather than resolved through
+   sctrlHENFindFunction: Adrenaline/Epinephrine <=7 export sctrlSEGetConfigEx but
+   NOT the resolver, so calling the resolver crashes there -- wherever it is
+   called from, which is why priming it at module_start only made the crash
+   happen earlier (hardware, 2026-08-29). XMB Item Hider hit this first and fixed
+   it the same way. Declared with the real signature so no function-type cast is
+   needed. */
+SEConfig *sctrlSEGetConfigEx(SEConfig *config, int size);
+
 int vsh_id[2] = { -1, -1 };
 int vsh_action_arg[2] = { -1, -1 };
 int last_action_arg[2] = { GAME_ACTION, GAME_ACTION };
@@ -212,11 +222,26 @@ static int count_pregame_hides_in_ini(void) {
     SceUID fd;
     int n, shift = 0;
 
+    /* Try the model-preferred device first, then the other one. XMBIH's ini
+       lives wherever xmbih.prx was loaded from, which we cannot see -- we can
+       only guess from the model. A wrong guess used to fail SILENTLY (open<0 ->
+       "shift 0"), which looks identical to "XMBIH isn't hiding anything": GC
+       Lite simply stops shifting Game with nothing else wrong. A PSP Go running
+       plugins from ms0:, or any model that reports unexpectedly, hit exactly
+       that. Reading a second path costs one failed open on the normal route. */
     path = (model == 4) ? "ef0:/SEPLUGINS/xmbih.ini"
                         : "ms0:/SEPLUGINS/xmbih.ini";
     fd = sceIoOpen(path, PSP_O_RDONLY, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        path = (model == 4) ? "ms0:/SEPLUGINS/xmbih.ini"
+                            : "ef0:/SEPLUGINS/xmbih.ini";
+        fd = sceIoOpen(path, PSP_O_RDONLY, 0);
+    }
+    if (fd < 0) {
+        kprintf("xmbih ini: NOT FOUND on either device (model=%i)\n", model);
         return 0;
+    }
+    kprintf("xmbih ini: opened %s\n", path);
     n = sceIoRead(fd, buf, sizeof(buf) - 1);
     sceIoClose(fd);
     if (n <= 0)
@@ -228,24 +253,59 @@ static int count_pregame_hides_in_ini(void) {
     shift += ini_key_is(buf, n, "HIDE_ALL_MUSIC", '2');
     shift += ini_key_is(buf, n, "HIDE_ALL_VIDEO", '2');
 
-    /* Extras (index 1) is also pre-Game when XMBIH fully hides it. */
-    if (ini_key_is(buf, n, "HIDE_ALL_EXTRAS", '2'))
-        shift++;
+    /* Extras (index 1) deliberately does NOT count. XMBIH refuses to hide that
+       column: module_start downgrades HIDE_ALL_EXTRAS=2 to 1 (`if (set[1] == 2)
+       set[1] = 1;`) and top_category_requested_hidden(1) returns 0
+       unconditionally, so Extras never contributes to XMBIH's
+       adjust_topitem_for_hidden_categories(). xmbih.ini says so in its own
+       header: "Extras and Settings can't be fully hidden with 2 - they fall back
+       to 1."
+
+       Counting it here made GC Lite look one column LEFT of where Game actually
+       is, which silently disables everything (context menu, categories) with no
+       other symptom. Hardware, ARK-4 PSP Go 2026-08-29: probe active=1, ini read
+       fine, shift=2 -> want_game=3, while the real Game items arrived at
+       topitem=4. */
 
     return shift;
 }
 
 static int xmbih_is_active(void) {
-    /* Was: a raw read of vsh_text_addr+0x20890 (XMBIH's patch signature). That
-       faults on firmwares whose vsh is sized differently (Adrenaline/Epinephrine
-       <=7), crashing the XMB at boot even with XMBIH absent -- and it runs very
-       early (right after vsh patching, while modules are still loading), so a
-       module-list walk (kuKernelFindModuleByName) races and faults there too.
-       Instead we record XMBIH's presence when its module loads (main.c
-       OnModuleStart), so this is just a flag read -- safe on every firmware.
-       The pre-Game shift still comes from xmbih.ini, so XMBIH-compat behaviour
-       is unchanged wherever XMBIH actually runs. */
-    return g_xmbih_present;
+    u32 instr;
+
+    /* Read the location XMBIH patches (its top-category count patch) and ask
+       whether a JAL is sitting there. This is the original detection, restored:
+       no file, no handshake, no dependency on which VSH plugin loads first --
+       which is what the xmbih.state scheme cost us (it broke Game detection on
+       ARK-5 when the plugins loaded in the other order, and left a stray file on
+       the Memory Stick whenever XMBIH ran without GC Lite to consume it).
+
+       It was removed on the theory that a raw vsh read faults where vshmain is
+       sized differently. Bounds-check it against the module's real text size and
+       that concern is answered directly, without inventing a second channel.
+       (Hardware since showed Adrenaline 7 runs the same 6.61 vshmain, where this
+       offset is valid anyway -- the crash that prompted the removal was the late
+       sctrlSEGetConfigEx call fixed in the same commit.) */
+    if (!vsh_text_addr)
+        return 0;
+    /* Enforce the bound ONLY when the size is actually known. Not every loader
+       populates SceModule2.text_size for vsh_module, and treating "0" as "too
+       small" turns this probe into a silent "XMBIH not active" -- which is
+       exactly "GC Lite stops shifting Game" with no other symptom. The original
+       probe did this read unguarded and was fine on ARK for years, so an unknown
+       size must fall back to that behaviour rather than fail closed. */
+    if (vsh_text_size && vsh_text_size < XMBIH_COUNT_PATCH_OFFSET + 4) {
+        kprintf("xmbih probe: size %08X too small for off %08X -> inactive\n",
+                vsh_text_size, (u32)XMBIH_COUNT_PATCH_OFFSET);
+        return 0;
+    }
+    instr = *(u32 *)(vsh_text_addr + XMBIH_COUNT_PATCH_OFFSET);
+    /* Decisive line: vsh base, reported size, and the word actually sitting at
+       XMBIH's patch site. A JAL (top 6 bits == 3) means XMBIH patched. */
+    kprintf("xmbih probe: vsh=%08X size=%08X instr=%08X op=%i active=%i\n",
+            vsh_text_addr, vsh_text_size, instr, (int)((instr >> 26) & 0x3F),
+            (int)(((instr >> 26) & 0x3F) == MIPS_OPCODE_JAL));
+    return ((instr >> 26) & 0x3F) == MIPS_OPCODE_JAL;
 }
 
 static int is_ark_custom_item(const char *text) {
@@ -271,15 +331,42 @@ static int extras_hidden_by_fake_region(void) {
 
         fake_region_loaded = 1;
 
-        get_se_config_ex = (GetSEConfigExFunc)sctrlHENFindFunction(
-            "SystemCtrlForUser", "SystemCtrlForUser", SE_CONFIG_EX_NID);
+        /* Direct, not via sctrlHENFindFunction -- that resolver is absent on
+           Adrenaline/Epinephrine <=7 and calling it crashes there. */
+        get_se_config_ex = sctrlSEGetConfigEx;
         if (get_se_config_ex) {
-            SEConfig se_config;
-            sce_paf_private_memset(&se_config, 0, sizeof(se_config));
-            if (get_se_config_ex(&se_config, sizeof(se_config))) {
+            /* OVERSIZED BUFFER, and success is ret == 0.
+
+               The real SEConfig is LARGER than the 36 bytes this header
+               declares, so the CFW writes past a plain `SEConfig se_config;`
+               and smashes our stack -- a delayed crash, not a fault at the call.
+               That is the ARK-5 UMD-hover crash: disabling this call entirely
+               fixed it while the return value was identical (off14 reads 0
+               there), so the damage was the write, not the result.
+               It stayed hidden until today because the old code path only
+               reached this call when g_xmbih_present was set, which never
+               happens on ARK-5 (XMBIH loads before GC Lite, so our handler never
+               sees it) -- CL-HEAD therefore never made the call and never
+               crashed, at the cost of never detecting the shift either.
+
+               Also: this returns int, 0 = success. The header types it as
+               returning SEConfig*, so the old truthiness test treated success as
+               failure and the region was never read at all. Measured on PRO:
+               sizes 36..80 return 0 with the struct populated, 128 returns -2,
+               and vshregion sits at BYTE OFFSET 14, not the 16 this struct
+               computes. XMB Item Hider carries the identical fix. */
+            static u32 cfgbuf[64];
+            unsigned char *cfgb = (unsigned char *)cfgbuf;
+            int cfgret;
+
+            sce_paf_private_memset(cfgbuf, 0, sizeof(cfgbuf));
+            cfgret = (int)(long)get_se_config_ex((SEConfig *)cfgbuf,
+                sizeof(SEConfig));
+            kprintf("SEConfig ret=%i off14=%i off16=%i\n",
+                    cfgret, cfgb[14], cfgb[16]);
+            if (cfgret == 0)
                 fake_region_hides_extras =
-                    fake_region_value_hides_extras(se_config.vshregion);
-            }
+                    fake_region_value_hides_extras(cfgb[14]);
         }
     }
 
@@ -296,74 +383,25 @@ void gc_prime_xmbih_detection(void) {
     (void)extras_hidden_by_fake_region();
 }
 
-/* Read the Game column XMBIH actually resolved, from xmbih.state -- written by
-   XMBIH's module_start only once it is certain it will patch, and removed on
-   every inert path (unsupported firmware, USE_PLUGIN=0). Returns -1 when the
-   file is absent or malformed, which unambiguously means "XMBIH applied no
-   shift". Returns the topitem otherwise. */
-static int read_xmbih_state_topitem(void) {
-    static char buf[64];
-    const char *path;
-    SceUID fd;
-    int n, i;
 
-    path = (model == 4) ? "ef0:/SEPLUGINS/xmbih.state"
-                        : "ms0:/SEPLUGINS/xmbih.state";
-    fd = sceIoOpen(path, PSP_O_RDONLY, 0);
-    if (fd < 0)
-        return -1;
-    n = sceIoRead(fd, buf, sizeof(buf) - 1);
-    sceIoClose(fd);
-    /* CONSUME it. XMBIH rewrites the file every boot in module_start, before we
-       ever read it, so deleting here makes a stale value impossible: if XMBIH is
-       later uninstalled or disabled in PLUGINS.txt -- and so never runs to clean
-       up after itself -- the next boot simply finds no file and we correctly
-       apply no shift, instead of trusting a number from a previous boot. */
-    sceIoRemove(path);
-    if (n <= 0)
-        return -1;
-    buf[n] = 0;
-
-    for (i = 0; i + 13 < n; i++) {
-        if (sce_paf_private_strncmp(buf + i, "GAME_TOPITEM=", 13) == 0) {
-            char c = buf[i + 13];
-            if (c >= '0' && c <= '7')
-                return c - '0';
-            return -1;
-        }
-    }
-    return -1;
-}
 
 static void load_xmbih_shift(void) {
-    int shift, published;
+    int shift;
 
     xmbih_shift_loaded = 1;
     shift = 0;
 
-    /* Preferred path: take the number straight from XMBIH. Deriving it here
-       from xmbih.ini is a SECOND guess that has to agree with what XMBIH really
-       did, and on Adrenaline/Epinephrine <=7 it didn't -- XMBIH's module_start
-       bailed on the unlisted 6.61 devkit and hid nothing, while this code saw
-       its module load, read HIDE_ALL_PHOTO=2, and moved Games to a column that
-       was never vacated. The state file is written only when XMBIH will
-       actually patch, so it cannot disagree. */
-    published = read_xmbih_state_topitem();
-    kprintf("xmbih.state published=%i (>=0 means authoritative)\n", published);
-    if (published >= 0) {
-        xmbih_game_topitem = published;
-        kprintf("xmbih game_topitem=%i (from state file)\n", xmbih_game_topitem);
-        return;
-    }
-
-    /* Fallback for an XMBIH too old to publish xmbih.state. Still gated on
-       XMBIH being loaded: when it isn't (e.g. EPI<=7 with xmbih.prx disabled),
-       skip the xmbih.ini read and the SEConfig lookup entirely -- both fault at
-       this early boot point there, and there's nothing to sync. */
-    if (xmbih_is_active()) {   /* g_xmbih_present */
+    /* Derive the shift from xmbih.ini, gated on XMBIH actually having patched
+       vshmain (probe above). This is what shipped on ARK for years. When XMBIH
+       is absent or inert, skip the ini read and the SEConfig lookup entirely --
+       both fault at this early boot point on Adrenaline <=7 and there is nothing
+       to sync anyway. */
+    if (xmbih_is_active()) {
+        /* No fake-region term: XMBIH does not count Extras either (main.c
+           top_category_requested_hidden case 1). Counting it on both sides was
+           tried 2026-08-30 and disproven -- it did not fix the PRO crash and
+           only moved Game a column. These two must always agree. */
         shift = count_pregame_hides_in_ini();
-        if (extras_hidden_by_fake_region())
-            shift++;
     }
     if (shift > 0 && shift <= 4)
         xmbih_game_topitem = 5 - shift;
@@ -503,7 +541,15 @@ int AddVshItemPatched(void *arg, int topitem, SceVshItem *item) {
    and behaviour is unchanged. */
 static int game_action_arg_for(int location) {
     if (location == INTERNAL_STORAGE && gc_adrenaline()) {
-        return vsh_action_arg[MEMORY_STICK];
+        /* Only substitute once the Memory Stick action has been captured.
+           vsh_action_arg[] starts { -1, -1 }, so this is a guard against
+           handing ExecuteAction a -1, not the cause of any known crash --
+           hardware logs showed both slots populated (ms=2 ef=9) in the
+           System Storage crash, so this branch did not fire there. Kept
+           because -1 would be a real problem if it ever did. */
+        if (vsh_action_arg[MEMORY_STICK] >= 0) {
+            return vsh_action_arg[MEMORY_STICK];
+        }
     }
     return vsh_action_arg[location];
 }
@@ -551,7 +597,9 @@ int ExecuteActionPatched(int action, int action_arg) {
                     action_arg);
         }
     }
-    kprintf("sending action: %i, action_arg: %i\n", action, action_arg);
+    kprintf("sending action: %i, action_arg: %i (ms_arg=%i ef_arg=%i adr=%i)\n",
+            action, action_arg, vsh_action_arg[MEMORY_STICK],
+            vsh_action_arg[INTERNAL_STORAGE], gc_adrenaline());
     return ExecuteAction(action, action_arg);
 }
 
@@ -654,22 +702,107 @@ static void *game_context_temp1 = NULL;
 static void *game_context_temp2 = NULL;
 static int game_context_template_valid = 0;
 
-/* Adrenaline 8 runs the 6.61 vsh_module. These are runtime-relative
-   relationships observed in the real Memory Stick DisplayContext call:
+/* Adrenaline 8 runs the stock 6.61 vsh_module, so the Game-column context menu
+   is displayed by a fixed callsite in vshmain. Disassembled (vshmain.prx exec
+   LOAD segment, file offset 0xA0):
 
-       common-GUI object = OnXmbPush arg0 - 0xA070
-       page              = vsh_module + 0x4429C
-       plane             = vsh_module + 0x447C4
-       menu list         = vsh_module + 0x447C8
+       1cb6c:  3c120000   lui   s2, %hi(g_context_object)
+       1cb70:  8e446188   lw    a0, %lo(g_context_object)(s2)
+       1cb74:  3c110004   lui   s1, %hi(page)
+       1cb78:  3c060004   lui   a2, %hi(plane)
+       1cb7c:  3c080004   lui   t0, %hi(mlist)
+       1cb80:  2625429c   addiu a1, s1, %lo(page)    -> "J"  (rodata +0x4429C)
+       1cb84:  24c647c4   addiu a2, a2, %lo(plane)   -> "M"  (rodata +0x447C4)
+       1cb88:  250847c8   addiu t0, t0, %lo(mlist)   -> "NE" (rodata +0x447C8)
+       1cb8c:  00004821   move  t1, zero             -> temp1 = NULL
+       1cb90:  0c00fefa   jal   sceVshCommonGuiDisplayContext
+       1cb94:  00005021   move  t2, zero             -> temp2 = NULL
 
-   ASLR moves both bases, so derive them at the moment System Storage is
-   activated. This removes the need to open Memory Stick once merely to cache
-   those same four values. Keep the captured template as a conservative
-   fallback/reference for any subsequent attempt in the same XMB session. */
-#define ADRENALINE_CONTEXT_OBJECT_DELTA 0xA070
+   The crucial part is `lw a0`: the context object is read from a GLOBAL, it is
+   not at any fixed distance from the XMB object. The old
+   ADRENALINE_CONTEXT_OBJECT_DELTA (0xA070) was the gap between two unrelated
+   heap allocations as they happened to land on one boot, which is why deriving
+   from it produced a wild pointer and took Epinephrine down.
+
+   We do not need to reimplement the relocation to find that global. By the time
+   we run, the loader has already relocated this code in memory, so the %hi/%lo
+   immediates at these instructions hold the real, post-ASLR values. Read them
+   back and we get exactly the operands vshmain itself would pass -- correct on
+   any base, on any boot, with nothing about heap layout assumed.
+
+   Only the callsite offset is hardcoded, which is what this codebase does
+   everywhere (see patches.CommonGuiDisplayContextOffset), and 6.61's vshmain is
+   a fixed binary. The 8-instruction opcode signature below is verified before
+   any of it is trusted, so a wrong offset bails instead of crashing. */
+#define ADRENALINE_CTX_CALLSITE         0x1CB6C
+
+/* Retained purely as a cross-check on the callsite: these rodata offsets were
+   confirmed against a real captured template on hardware. */
 #define ADRENALINE_CONTEXT_PAGE_OFFSET  0x4429C
 #define ADRENALINE_CONTEXT_PLANE_OFFSET 0x447C4
 #define ADRENALINE_CONTEXT_MLIST_OFFSET 0x447C8
+
+/* Top halfword of each instruction: opcode + register fields. Relocation only
+   ever rewrites the low 16 bits, so this is a stable signature at runtime. */
+static const u16 adrenaline_ctx_sig[8] = {
+    0x3C12, /* +0x00  lui   s2, ...      */
+    0x8E44, /* +0x04  lw    a0, ...(s2)  */
+    0x3C11, /* +0x08  lui   s1, ...      */
+    0x3C06, /* +0x0C  lui   a2, ...      */
+    0x3C08, /* +0x10  lui   t0, ...      */
+    0x2625, /* +0x14  addiu a1, s1, ...  */
+    0x24C6, /* +0x18  addiu a2, a2, ...  */
+    0x2508, /* +0x1C  addiu t0, t0, ...  */
+};
+
+#define CTX_INSN(a)   (*(volatile u32 *)(u32)(a))
+#define CTX_HI(a)     ((CTX_INSN(a) & 0xFFFF) << 16)
+#define CTX_LO(a)     ((int)(short)(CTX_INSN(a) & 0xFFFF))
+
+/* Rebuild the display template from the relocated callsite. Returns 0 on
+   success. Adrenaline/6.61 only; every caller gates on that already. */
+static int DeriveGameContextTemplate(void **out_arg, char **out_page,
+                                     char **out_plane, char **out_mlist) {
+    u32 site = vsh_text_addr + ADRENALINE_CTX_CALLSITE;
+    u32 obj_global;
+    char *page, *plane, *mlist;
+    void *arg;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        if ((u16)(CTX_INSN(site + (i * 4)) >> 16) != adrenaline_ctx_sig[i]) {
+            kprintf("SYSCTX-DIRECT-8: callsite signature mismatch at +%i: %08X want %04X\n",
+                    i * 4, (u32)CTX_INSN(site + (i * 4)), adrenaline_ctx_sig[i]);
+            return -1;
+        }
+    }
+
+    obj_global = CTX_HI(site + 0x00) + CTX_LO(site + 0x04);
+    page  = (char *)(CTX_HI(site + 0x08) + CTX_LO(site + 0x14));
+    plane = (char *)(CTX_HI(site + 0x0C) + CTX_LO(site + 0x18));
+    mlist = (char *)(CTX_HI(site + 0x10) + CTX_LO(site + 0x1C));
+
+    /* The rodata pointers must land where hardware said they do. If they do
+       not, we are reading the wrong callsite and must not proceed. */
+    if (page  != (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PAGE_OFFSET) ||
+        plane != (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PLANE_OFFSET) ||
+        mlist != (char *)(vsh_text_addr + ADRENALINE_CONTEXT_MLIST_OFFSET)) {
+        kprintf("SYSCTX-DIRECT-8: rodata cross-check failed page=%08X plane=%08X mlist=%08X\n",
+                (u32)page, (u32)plane, (u32)mlist);
+        return -1;
+    }
+
+    arg = *(void **)obj_global;
+    if (!arg) {
+        kprintf("SYSCTX-DIRECT-8: context object global @%08X is NULL\n", obj_global);
+        return -1;
+    }
+
+    kprintf("SYSCTX-DIRECT-8: derived from callsite: global=%08X arg=%08X\n",
+            obj_global, (u32)arg);
+    *out_arg = arg; *out_page = page; *out_plane = plane; *out_mlist = mlist;
+    return 0;
+}
 
 int sceVshCommonGuiDisplayContextPatched(void *arg, char *page, char *plane, int width, char *mlist, void *temp1, void *temp2) {
     int gamecats = context_gamecats;
@@ -696,6 +829,11 @@ int sceVshCommonGuiDisplayContextPatched(void *arg, char *page, char *plane, int
 }
 
 int ReplayGameContextDisplay(void *xmb_context_arg) {
+    /* Deliberately unused: the display template is now taken from vshmain's own
+       relocated callsite, so nothing is inferred from the XMB object's heap
+       address any more. Kept in the signature for the caller in context.c. */
+    (void)xmb_context_arg;
+
     void *arg = game_context_arg;
     char *page = game_context_page;
     char *plane = game_context_plane;
@@ -704,22 +842,37 @@ int ReplayGameContextDisplay(void *xmb_context_arg) {
     void *temp2 = game_context_temp2;
 
     if (!game_context_template_valid) {
-        if (!gc_adrenaline() || patch_index != FW_660 ||
-                !vsh_text_addr || !xmb_context_arg) {
-            kprintf("SYSCTX-DIRECT-8: cannot derive display template adrenaline=%i fw=%i vsh=%08X xmb=%08X\n",
-                    gc_adrenaline(), patch_index, vsh_text_addr, (u32)xmb_context_arg);
+        if (!gc_adrenaline() || patch_index != FW_660 || !vsh_text_addr) {
+            kprintf("SYSCTX-DIRECT-8: cannot derive display template adrenaline=%i fw=%i vsh=%08X\n",
+                    gc_adrenaline(), patch_index, vsh_text_addr);
             return -1;
         }
 
-        arg = (void *)((u32)xmb_context_arg - ADRENALINE_CONTEXT_OBJECT_DELTA);
-        page = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PAGE_OFFSET);
-        plane = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_PLANE_OFFSET);
-        mlist = (char *)(vsh_text_addr + ADRENALINE_CONTEXT_MLIST_OFFSET);
-        temp1 = NULL;
-        temp2 = NULL;
-        kprintf("SYSCTX-DIRECT-8: derived display template from XMB runtime\n");
+        /* No Memory Stick context has been shown yet, so there is nothing
+           captured to reuse. Rebuild the template from vshmain's own relocated
+           callsite instead of guessing the object pointer from a heap delta.
+           This is the path that used to take Epinephrine down when System
+           Storage was opened first. */
+        if (DeriveGameContextTemplate(&arg, &page, &plane, &mlist) < 0) {
+            return -1;
+        }
+        temp1 = NULL;   /* move t1, zero at the real callsite */
+        temp2 = NULL;   /* move t2, zero at the real callsite */
+        kprintf("SYSCTX-DIRECT-8: derived display template from vshmain callsite\n");
     } else {
         kprintf("SYSCTX-DIRECT-8: using captured Memory Stick display template\n");
+        /* Cross-validate: deriving from the callsite should reproduce the
+           captured object exactly. If these ever disagree the log says so
+           before it can matter. */
+        {
+            void *d_arg; char *d_page; char *d_plane; char *d_mlist;
+            if (gc_adrenaline() && patch_index == FW_660 && vsh_text_addr &&
+                    DeriveGameContextTemplate(&d_arg, &d_page, &d_plane, &d_mlist) == 0) {
+                kprintf("SYSCTX-DIRECT-8: derive-vs-capture arg %08X vs %08X %s\n",
+                        (u32)d_arg, (u32)arg,
+                        (d_arg == arg) ? "MATCH" : "MISMATCH");
+            }
+        }
     }
 
     kprintf("SYSCTX-DIRECT-8: replaying arg=%08X page=%08X plane=%08X mlist=%08X\n",

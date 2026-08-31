@@ -1,4 +1,4 @@
-Game Categories Lite v1.82
+Game Categories Lite v1.83
 
 The main differences in this version are the re-stabilization of the visibility of the
 Game Categories options listed within the System Settings (compared to v1.7), as well as 
@@ -84,6 +84,9 @@ Known issues:
 ------------------------------------------
 Changelog:
 ------------------------------------------
+v1.83:
+[!]Restore legacy CFW compatibility
+[!]Fix occasional crashes when selecting Game>System Storage on Epinephrine 8
 v1.82:
 [+]Epinephrine (Adrenaline) System Storage compatibility.
 v1.81:

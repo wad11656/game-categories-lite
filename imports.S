@@ -4,7 +4,7 @@
 
     STUB_START "SystemCtrlForUser",0x40090000,0x00020005
     STUB_FUNC 0x1C90BECB,sctrlHENSetStartModuleHandler
-    STUB_FUNC 0x159AF5CC,sctrlHENFindFunction
+    STUB_FUNC 0x8E426F09,sctrlSEGetConfigEx
     STUB_END
 
     STUB_START "KUBridge",0x40090000,0x00020005

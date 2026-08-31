@@ -86,7 +86,6 @@ int kuKernelFindModuleByName(const char *modname, SceModule2 *mod);
    (with `int` return type); the local re-declaration here conflicted with
    modern pspsdk and was unused inside categories_lite, so it's been removed. */
 STMOD_HANDLER sctrlHENSetStartModuleHandler(STMOD_HANDLER handler);
-u32 sctrlHENFindFunction(const char* szMod, const char* szLib, u32 nid);
 
 #ifdef __cplusplus
 }

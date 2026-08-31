@@ -27,6 +27,7 @@
 #include "pspdefs.h"
 #include "config.h"
 #include "logger.h"
+#include "vshitem.h"
 
 // change the module name back to GCLite once PRO stops doing weird things with plugins
 PSP_MODULE_INFO("Game_Categories_Light", 0x0807, 1, 5);
@@ -81,6 +82,9 @@ u32 text_size_game;
 /* Captured in OnModuleStart's vsh_module branch; used by vshitem.c's
    load_xmbih_shift to probe vshmain for XMBIH's patch signature. */
 u32 vsh_text_addr = 0;
+/* vsh_module's text size, so the XMBIH probe can bounds-check its read instead
+   of trusting a fixed offset to be inside whatever vshmain is mapped. */
+u32 vsh_text_size = 0;
 
 static STMOD_HANDLER previous;
 
@@ -111,6 +115,7 @@ int OnModuleStart(SceModule2 *mod) {
 
 	    kprintf("loading %s, text_addr: %08X\n", mod->modname, mod->text_addr);
         vsh_text_addr = mod->text_addr;
+        vsh_text_size = mod->text_size;   /* bounds-check for xmbih_is_active() */
         PatchVshmain(mod->text_addr);
         PatchVshmainForSysconf(mod->text_addr);
         PatchVshmainForContext(mod->text_addr);
@@ -186,6 +191,17 @@ int module_start(SceSize args UNUSED, void *argp UNUSED) {
     currfw[2] = ((devkit >> 16) & 0xF) + '0';
     currfw[3] = ((devkit >> 8) & 0xF) + '0';
     currfw[4] = 0;
+
+    /* Resolve the fake VSH region NOW, from the safe early context this helper
+       was written for -- it was defined but never actually called, which went
+       unnoticed while xmbih.state short-circuited load_xmbih_shift() before it
+       could reach extras_hidden_by_fake_region(). With the state file gone the
+       ini-derivation path always runs, so the first sctrlHENFindFunction /
+       GetSEConfigEx call would otherwise land inside the vsh item build, where
+       it faults on Adrenaline/Epinephrine <=7 (hardware: CL enabled crashed
+       Adrenaline 7, 2026-08-29). The result is cached, so the later call is just
+       a flag read. Safe no-op on firmwares where it already worked. */
+    gc_prime_xmbih_detection();
 
     previous = sctrlHENSetStartModuleHandler(OnModuleStart);
     return 0;
