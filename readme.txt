@@ -3,7 +3,7 @@ Game Categories Lite v1.83
 The main differences in this version are:
 1. Epinephrine 8 System Storage support
 2. Stabilization of the Game Categories menus within System Settings
-3. (Optional) Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB
+3. Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB
 
 ------------------------------------------
 Enhanced gclite_filter.txt Info:
