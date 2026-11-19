@@ -2,7 +2,7 @@ Game Categories Lite v1.83
 
 The main differences in this version are:
 1. Epinephrine 8 System Storage support
-2. Compatibility with latest versions of "XMB Item Hider" (https://github.com/wad11656/XMB-Item-Hider-PSP)
+2. Compatibility with latest fork of "XMB Item Hider" (https://github.com/wad11656/XMB-Item-Hider-PSP)
 3. Stabilization of the Game Categories menus within System Settings
 4. Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB
 
