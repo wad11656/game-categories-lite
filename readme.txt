@@ -4,7 +4,8 @@ The main differences in this version are:
 1. Epinephrine 8 System Storage support
 2. Compatibility with latest fork of "XMB Item Hider" (https://github.com/wad11656/XMB-Item-Hider-PSP)
 3. Stabilization of the Game Categories menus within System Settings
-4. Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB
+4. Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB.
+   - This plugin's category hiding is utilized in "Homebrew Sorter Ultimate" (https://github.com/wad11656/Homebrew-Sorter-Ultimate)
 
 ------------------------------------------
 Enhanced gclite_filter.txt Info:
