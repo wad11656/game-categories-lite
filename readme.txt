@@ -5,7 +5,7 @@ The main differences in this version are:
 2. Compatibility with latest fork of "XMB Item Hider" (https://github.com/wad11656/XMB-Item-Hider-PSP)
 3. Stabilization of the Game Categories menus within System Settings
 4. Enhancements to the gclite_filter.txt file, including hiding entire categories on the XMB.
-   - Hiding games and categories using this plugin can be done via "Homebrew Sorter Ultimate", which has Categories Lite configuration built into its GUI (https://github.com/wad11656/Homebrew-Sorter-Ultimate)
+   - Hiding games and categories using this plugin can be done via "Homebrew Sorter Ultimate", which has Categories Lite configuration settings built into its GUI (https://github.com/wad11656/Homebrew-Sorter-Ultimate)
 
 ------------------------------------------
 Enhanced gclite_filter.txt Info:
